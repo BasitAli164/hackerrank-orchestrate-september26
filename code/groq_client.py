@@ -6,6 +6,9 @@ Handles:
   - vision calls to Qwen 3.6 27B (VLM_MODEL)
   - usage tracking on every call
   - retry with bounded attempts on transient failures
+
+Token caps are enforced at each call site to stay under per-minute limits
+on the free tier (especially Qwen's 1000 OTPM cap).
 """
 from __future__ import annotations
 
@@ -31,6 +34,11 @@ log = logging.getLogger(__name__)
 
 # Load .env once at import
 load_dotenv()
+
+# Per-call max_tokens caps (safety against OTPM limits on free tier)
+_LLM_JSON_MAX_TOKENS = 2000
+_LLM_TEXT_MAX_TOKENS = 600
+_VLM_JSON_MAX_TOKENS = 400
 
 
 class GroqError(RuntimeError):
@@ -97,6 +105,7 @@ class GroqClient:
                     response_format=response_format,
                     reasoning_effort=LLM_REASONING_EFFORT,
                     temperature=0,
+                    max_tokens=_LLM_JSON_MAX_TOKENS,
                 )
                 self._track(resp, purpose, request_id)
                 content = resp.choices[0].message.content or "{}"
@@ -132,6 +141,7 @@ class GroqClient:
                     messages=messages,
                     temperature=0,
                     reasoning_effort="low",
+                    max_tokens=_LLM_TEXT_MAX_TOKENS,
                 )
                 self._track(resp, purpose, request_id)
                 return (resp.choices[0].message.content or "").strip()
@@ -192,6 +202,7 @@ class GroqClient:
                     messages=messages,
                     response_format={"type": "json_object"},
                     temperature=0,
+                    max_tokens=_VLM_JSON_MAX_TOKENS,
                 )
                 self._track(resp, purpose, request_id)
                 content = resp.choices[0].message.content or "{}"
