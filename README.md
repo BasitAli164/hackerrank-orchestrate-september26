@@ -1,193 +1,517 @@
-# HackerRank Orchestrate
+# Buy or Wait — AI Financial Affordability Agent
 
-Starter repository for the **HackerRank Orchestrate** 24-hour hackathon (September 2026).
+**HackerRank Orchestrate — September 2026 submission.**
 
-## Buy or Wait?
+A deterministic financial decision engine that answers:
 
-Build an AI-powered financial agent that decides whether a user can safely afford a requested expense.
+> **"Can this user safely afford this requested expense?"**
 
-A user may ask: **"Can I afford this laptop?"**
-
-Answering well takes more than the current balance. The agent must account for recurring expenses, pending payments, essential spending, confirmed income, available payment options, and relevant details buried in messages and images.
-
-For every request, the agent decides whether the user should pay in full, pay partially, use installments, wait, or not proceed. The recommendation must be personalized: two users with the same balance can deserve different answers based on their commitments, priorities, payment preferences, and willingness to adjust flexible expenses.
-
-A recommendation is safe only if the user can complete the full payment plan, cover essential expenses, and stay above their preferred minimum balance throughout the forecast period.
-
-Read [`problem_statement.md`](./problem_statement.md) for the full task spec, input/output schema, allowed values, conflict-resolution rules, and submission format.
+The system reconstructs each user's financial situation from the supplied
+datasets, projects a 90-day balance forecast, and recommends one of four
+affordability outcomes with an eligible payment plan.
 
 ---
 
-## Quick Start
+## Table of Contents
 
-Clone the repository and move into the project directory:
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Models Used](#models-used)
+4. [Setup](#setup)
+5. [Running the Agent](#running-the-agent)
+6. [Project Structure](#project-structure)
+7. [How the Engine Works](#how-the-engine-works)
+8. [Key Design Decisions](#key-design-decisions)
+9. [Testing](#testing)
+10. [Usage & Cost Report](#usage--cost-report)
+11. [Submission Artifacts](#submission-artifacts)
+12. [Limitations](#limitations)
 
-```bash
-git clone https://github.com/interviewstreet/hackerrank-orchestrate-september26.git
-cd hackerrank-orchestrate-september26
+---
+
+## Overview
+
+The task is a **financial affordability decision system**, not a chatbot.
+For each request, the agent determines:
+
+- `amount_safe_to_pay` — largest amount payable today that keeps the user
+  above their minimum balance for the next 90 days
+- `affordability_status` — one of `affordable_now`, `affordable_with_plan`,
+  `affordable_later`, `not_affordable`
+- `recommended_payment_method` — `full_payment`, `partial_payment`,
+  `installments`, `wait`, or `not_recommended`
+- `payment_plan` — dated list of recommended payments
+- `earliest_date_for_full_payment` — first date the full amount is safe
+- `spending_changes_needed` — flexible recurring expenses to stop or reduce
+- `decision_explanation` — short, personalized rationale
+
+Every financial value is produced by **deterministic Python**. The LLM
+only assists with **interpretation** (of messages and images) and
+**phrasing** (of the final explanation).
+
+---
+
+## Architecture
+
+```
+                 ┌──────────────────────┐
+                 │      DATASETS        │
+                 └──────────┬───────────┘
+                            │
+                            ▼
+                 ┌──────────────────────┐
+                 │  DATA LOADING +      │
+                 │  CLEANING (pandas)   │
+                 └──────────┬───────────┘
+                            │
+                            ▼
+                 ┌──────────────────────┐
+                 │  EVENT RESOLUTION    │
+                 │  (linked_event_id)   │
+                 └──────────┬───────────┘
+                            │
+             ┌──────────────┴──────────────┐
+             │                             │
+             ▼                             ▼
+      GPT-OSS 120B                  Qwen 3.6 27B
+      TEXT / REASONING              VISION / OCR
+             │                             │
+             └──────────────┬──────────────┘
+                            ▼
+                 ┌──────────────────────┐
+                 │  STRUCTURED FACTS    │
+                 └──────────┬───────────┘
+                            ▼
+                 ┌──────────────────────┐
+                 │  DETERMINISTIC       │
+                 │  FINANCIAL ENGINE    │
+                 │  - currency          │
+                 │  - 90-day forecast   │
+                 │  - affordability     │
+                 └──────────┬───────────┘
+                            ▼
+                 ┌──────────────────────┐
+                 │  PLAN GENERATION     │
+                 │  VALIDATION + RANK   │
+                 └──────────┬───────────┘
+                            ▼
+                 ┌──────────────────────┐
+                 │  FINAL DECISION      │
+                 └──────────┬───────────┘
+                            ▼
+                    GPT-OSS 120B
+                    EXPLANATION
+                            │
+                            ▼
+                      output.csv
 ```
 
-Build your solution in `code/main.py`, or use another language and document its entry point clearly.
+**Core principle:** AI for interpretation, Python for financial truth.
 
-Your solution must:
+---
 
-- Read the input files from `dataset/`
-- Generate one prediction for every request
-- Write the final predictions to `output.csv` in the repository root
+## Models Used
 
-Run the starter Python entry point with:
+Both models are accessed through the **Groq API**.
 
-```bash
-python3 code/main.py
+| Role | Model ID | Purpose |
+|---|---|---|
+| Text / reasoning | `openai/gpt-oss-120b` | Message fact extraction, final explanation |
+| Vision / OCR | `qwen/qwen3.6-27b` | Extract amounts from event images |
+
+Model IDs are configurable via environment variables
+(`GROQ_LLM_MODEL`, `GROQ_VLM_MODEL`) — no IDs are hardcoded throughout
+the codebase.
+
+Every API call is tracked by `code/usage_tracker.py`, and a summary is
+written to `code/evaluation/usage_report.md` at the end of every run.
+
+### Why these models
+
+- **GPT-OSS 120B** supports strict JSON Schema mode on Groq, which lets
+  us validate message extractions deterministically. It also handles
+  English + Indonesian messages cleanly.
+- **Qwen 3.6 27B** is Groq's vision-capable model and is only invoked
+  for the **16 events** whose `amount` is blank but has a linked image.
+  No images are sent to the text model, and no text messages are sent
+  to the vision model.
+
+---
+
+## Setup
+
+### Prerequisites
+
+- Python 3.10+
+- A Groq API key (free tier works, though rate limits apply)
+
+### Installation
+
+From the **project root** (`hackerrank-orchestrate-september26/`):
+
+```powershell
+# Create and activate a virtual environment
+python -m venv .venv
+source .venv/Scripts/activate          # Git Bash / MINGW64
+# or
+.venv\Scripts\Activate.ps1             # PowerShell
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-After running your solution, confirm that `output.csv` exists in the repository root and contains the required columns and one row for every request.
+### Configuration
 
-## Important File Locations
+Create a `.env` file at the project root:
+
+```powershell
+cp .env.example .env
+```
+
+Then edit `.env` and set your key:
 
 ```text
-dataset/        Input data and the blank output template. Do not modify the input data.
-code/           Your solution code.
-output.csv      Final generated predictions in the repository root.
-code.zip        ZIP file containing your complete solution for submission.
+GROQ_API_KEY=gsk_your_real_key_here
+GROQ_LLM_MODEL=openai/gpt-oss-120b
+GROQ_VLM_MODEL=qwen/qwen3.6-27b
+GROQ_REASONING_EFFORT=medium
+LOG_LEVEL=INFO
 ```
 
-The blank template at `dataset/output.csv` is provided as a reference. Your final generated file must be the root-level `output.csv`.
+**Never commit `.env`.** Only `.env.example` belongs in version control.
 
 ---
 
-## Repository Layout
+## Running the Agent
 
-```text
-.
-├── AGENTS.md                         # Rules for AI coding tools + transcript logging
-├── problem_statement.md              # Full challenge statement
-├── README.md                         # You are here
-├── code/                             # Your solution code
-├── output.csv                        # Final generated predictions
-└── dataset/
-    ├── requests.csv                  # 250 requests to evaluate — predict these
-    ├── output.csv                    # Blank submission template
-    ├── sample_requests.csv           # 25 solved examples
-    ├── financial_profiles.csv        # Balances, minimum balance, priorities, preferences
-    ├── financial_events.csv          # Historical, pending, and confirmed transactions
-    ├── request_payment_options.csv   # Payment options available per request
-    ├── exchange_rates.csv            # Fixed, dated conversion rates
-    ├── messages.csv                  # Messages tied to users, requests, or events
-    ├── images.csv                    # Payroll letters, statements, bills, receipts
-    └── media/
-        └── images/
+All commands are run from the `code/` directory.
+
+### Full run (recommended for submission)
+
+Processes all 250 rows in `dataset/requests.csv`, uses LLM explanations:
+
+```powershell
+cd code
+python main.py
 ```
 
-Only `dataset/requests.csv` requires predictions. Everything else is context. Join user records with `user_id`, request records with `request_id`, supporting evidence with `related_event_id`, and exchange rates with the rate date and currency pair.
+Runtime on the free tier: **~8–12 minutes** (rate-limit bound).
 
-Amounts are in the user's `home_currency` — the dataset uses INR, ZAR, IDR, USD, and EUR, and every conversion rate you need is in `exchange_rates.csv`. All dates are `YYYY-MM-DD`. Live exchange rates, market data, and banking access are not required.
+### Fast run (deterministic explanations only)
 
----
+Same 250 rows, no LLM explanation calls:
 
-## What You Need to Build
-
-For every row in `dataset/requests.csv`, produce one row in `output.csv` with:
-
-| Column | Meaning |
-|---|---|
-| `request_id` | The request being answered |
-| `amount_safe_to_pay` | Largest amount safe to pay on `request_date` before optional spending changes, after protecting essentials and the minimum balance |
-| `affordability_status` | `affordable_now`, `affordable_with_plan`, `affordable_later`, or `not_affordable` |
-| `recommended_payment_method` | `full_payment`, `partial_payment`, `installments`, `wait`, or `not_recommended` |
-| `payment_plan` | Chronological `<YYYY-MM-DD>:<amount>` entries joined by `\|`, or `none` |
-| `earliest_date_for_full_payment` | Earliest date the full amount is forecast safe as one payment; empty if never within the forecast |
-| `spending_changes_needed` | Up to three `stop:<event_id>` / `reduce_to:<event_id>:<amount>` changes joined by `\|`, or `none` |
-| `decision_explanation` | Short explanation and the financial facts behind it |
-
-`0 <= amount_safe_to_pay <= requested_amount` must always hold. Installment plans must exactly match a supplied payment option, and only recurring expenses marked flexible may be changed.
-
-`affordable_with_plan` means the full request is completed through a partial-payment schedule, installments, or permitted spending changes. Recommend `partial_payment` only when the request allows it, the user accepts it, `0 < amount_safe_to_pay < requested_amount`, and `earliest_date_for_full_payment` is on or before `desired_completion_date`. Use exactly two payments: pay `amount_safe_to_pay` on `request_date`, then pay the remaining amount on `earliest_date_for_full_payment`. The two payments must add up to `requested_amount`. Unlike installments, partial payment does not need to match a supplied payment option.
-
----
-
-## Suggested Workflow
-
-1. Inspect `dataset/sample_requests.csv` — 25 requests with completed output columns — to understand the expected format and decision style.
-2. Reconstruct each user's financial state from `financial_profiles.csv` and `financial_events.csv`: separate recurring expenses from one-time events, reserve pending transactions, count confirmed salary only on its settlement date, and de-duplicate repeated representations of the same event.
-3. When an event has a blank `amount`, find its `event_id` as `related_event_id` in `images.csv` and extract the amount from the linked image. Never treat a blank amount as zero. Pull in any other relevant messages, images, and payment options for the request.
-4. Forecast forward and generate a plan that keeps the balance above the minimum at every step.
-5. Verify deterministically — bounds, plan feasibility, schedule match, flexible-only spending changes — before writing `output.csv`.
-6. Score yourself on the solved samples, then run the full dataset.
-
-You may use any language or runtime. Python, JavaScript, and TypeScript are all reasonable choices.
-
----
-
-## Requirements
-
-Your solution must:
-
-- be runnable from the terminal
-- read the provided files from `dataset/`
-- produce a valid `output.csv` with the exact required columns in the exact required order
-- include one prediction for every `request_id` in `dataset/requests.csv`
-- not use organizer-only files or hardcoded labels
-- keep behavior deterministic where possible
-
-If you use API keys or secrets, read them from environment variables. Never hardcode secrets in the repo.
-
----
-
-## Evaluation
-
-Your `output.csv` will be compared against hidden ground-truth values.
-
-The scoring will consider:
-
-- accuracy of `amount_safe_to_pay`
-- correctness of `affordability_status`
-- correctness of `recommended_payment_method` and `payment_plan`
-- accuracy of `earliest_date_for_full_payment`
-- validity of `spending_changes_needed`
-- usefulness and consistency of `decision_explanation`
-
-### Token Usage And Cost Analysis
-
-Your `code.zip` must include one token-usage file:
-
-```text
-evaluation/usage_report.md
+```powershell
+cd code
+python main.py --no-llm-exp
 ```
 
-The report must cover model providers and names, model calls, input and output tokens, total and average tokens per request, estimated total and per-request cost. The reported values must correspond to the final full-dataset run that produced your `output.csv`.
+Runtime: **~30 seconds**.
 
----
+### Sanity-check run on samples
 
-## Chat Transcript Logging
+Runs on `dataset/sample_requests.csv` (25 rows) instead of the full set:
 
-This repo includes an [`AGENTS.md`](./AGENTS.md) file for AI coding tools. It asks compatible tools to append conversation summaries to a `log.txt` in the repository root — the same directory as `AGENTS.md`:
+```powershell
+cd code
+python main.py --samples
+```
 
-| Platform | Path |
-|---|---|
-| macOS / Linux | `<repo root>/log.txt` |
-| Windows | `<repo root>\log.txt` |
+### Outputs
 
-The path resolves relative to `AGENTS.md`, so it stays correct across clones, renames, and checkouts. `log.txt` is gitignored — upload it as your chat transcript at submission time. Do not paste secrets into the chat.
-
-In case, the harness you are using is not in the repo root, you can explicitly ask the agent to look for the AGENTS.md in this folder & then continue.
-
----
-
-## Submission
-
-Submit the following files as instructed by HackerRank:
+Every run writes:
 
 | File | Description |
 |---|---|
-| `code.zip` | Full runnable solution, prompts/configuration, README, and the required `evaluation/` folder |
-| `output.csv` | Predictions for every row in `dataset/requests.csv` |
-| `chat_transcript` | The `log.txt` described above, showing how you developed or used the system |
+| `dataset/output.csv` | Final predictions for every `request_id` |
+| `code/evaluation/usage_report.md` | Token & cost summary for the run |
+| `logs/run.log` | Full run log (INFO + warnings) |
 
-Before submitting, confirm:
+---
 
-- `output.csv` has one row per row in `dataset/requests.csv` (250 rows plus the header).
-- `output.csv` has the exact required columns in the exact required order.
-- Every `amount_safe_to_pay` satisfies `0 <= amount_safe_to_pay <= requested_amount`.
-- Every installment plan matches a supplied payment option, and every spending change targets a flexible recurring expense.
-- Your runnable code, setup instructions, and `evaluation/` folder are included in `code.zip`.
+## Project Structure
+
+```
+hackerrank-orchestrate-september26/
+├── code/
+│   ├── main.py                 # entry point
+│   ├── config.py               # paths, model IDs, pricing, constants
+│   ├── data_loader.py          # CSV loading
+│   ├── data_cleaner.py         # date / numeric / list-field parsing
+│   ├── currency.py             # dated conversion + triangulation
+│   ├── financial_state.py      # per-user ledger builder
+│   ├── forecast.py             # 90-day balance forecast
+│   ├── affordability.py        # safe amount + earliest full-payment date
+│   ├── payment_planner.py      # candidate plans
+│   ├── spending_optimizer.py   # stop / reduce_to candidate sets
+│   ├── validator.py            # deterministic plan validation
+│   ├── ranking.py              # 6-tier ranking
+│   ├── message_analyzer.py     # GPT-OSS 120B fact extraction
+│   ├── image_analyzer.py       # Qwen 3.6 27B image OCR
+│   ├── explanation.py          # explanation generation + fallback
+│   ├── pipeline.py             # per-request orchestration
+│   ├── groq_client.py          # Groq wrapper (retries, tokens, caps)
+│   ├── usage_tracker.py        # token & cost accumulator
+│   └── evaluation/
+│       ├── main.py             # eval context stub
+│       └── usage_report.md     # generated at end of run
+│
+├── dataset/                    # provided data (read-only)
+│   ├── requests.csv
+│   ├── sample_requests.csv
+│   ├── financial_profiles.csv
+│   ├── financial_events.csv
+│   ├── exchange_rates.csv
+│   ├── request_payment_options.csv
+│   ├── messages.csv
+│   ├── images.csv
+│   ├── output.csv              # final submission output
+│   └── media/images/           # 16 PNGs
+│
+├── tests/
+│   └── test_pipeline.py        # pytest smoke tests
+│
+├── logs/                       # run.log written at runtime
+├── README.md
+├── requirements.txt
+├── .env.example
+└── .gitignore
+```
+
+---
+
+## How the Engine Works
+
+### 1. Data loading and cleaning
+
+All CSVs are loaded with pandas. Dates are parsed to date-only
+timestamps, numeric columns are coerced, and pipe-delimited preference
+fields in `financial_profiles.csv` are split into Python lists.
+
+### 2. Event resolution
+
+`financial_events.csv` contains full lifecycle chains via
+`linked_event_id`. Child events (amendments, cancellations, settlements)
+supersede their parents. We drop:
+
+- Events with `status` in `{cancelled, failed, unrealized}`
+- Events of type `investment_valuation`
+- Events with `direction == non_cash`
+
+Settled events from the past are used as **evidence of recurrence** but
+are not re-applied to the balance, because the profile's
+`current_available_balance` already reflects them.
+
+### 3. Currency normalisation
+
+All amounts are converted to the user's `home_currency` using
+`exchange_rates.csv` only. Direct pair → inverse pair → USD
+triangulation, all dated. `Decimal` arithmetic throughout.
+
+### 4. Recurring-series detection
+
+Recurring series are grouped by `(direction, category, amount-bucket)`.
+A series must have:
+
+- **≥ 2** occurrences
+- Amounts within **±2 %** of the median (guards against lumping
+  one-off purchases into a subscription)
+- A **dominant interval** shared by ≥ 60 % of gaps
+
+Volatile categories such as groceries and dining are **not** treated as
+recurring.
+
+### 5. 90-day forecast
+
+For each recurring series, we project future occurrences using the
+**latest** amount and the dominant interval. One-off future events are
+added as-is. Everything is applied day-by-day against the starting
+balance.
+
+A plan is safe only if the balance **never** drops below
+`minimum_balance_to_keep` at any point in the window.
+
+### 6. Affordability
+
+- **`amount_safe_to_pay`**: binary search over `[0, requested_amount]`
+  using the safety predicate above.
+- **`earliest_date_for_full_payment`**: forward scan day-by-day until a
+  full payment on that day keeps the forecast safe.
+
+### 7. Candidate plans
+
+For every request we generate:
+
+1. `full_payment` — pay the full amount today
+2. `partial_payment` — two payments: `amount_safe_to_pay` today and the
+   remainder on `earliest_date_for_full_payment`
+3. `installments` — one candidate per matching row in
+   `request_payment_options.csv` (the plan must match exactly)
+4. `wait` — pay the full amount on the earliest safe date
+5. `not_recommended` — the fallback, no payments
+
+### 8. Spending-change candidates
+
+Flexible recurring expenses may be:
+
+- `stop:<event_id>` — if flexibility ∈ {stoppable, reducible_or_stoppable}
+- `reduce_to:<event_id>:<amount>` — if flexibility ∈ {reducible,
+  reducible_or_stoppable} and `amount >= minimum_allowed_amount`
+
+We generate up to 60 change-sets per request (bounded), sorted by
+preference for fewer changes and larger savings.
+
+### 9. Validation
+
+Each `(plan, spending_changes)` combination is validated:
+
+- Method must be allowed by `payment_methods_user_will_consider`
+- Payments must be within the 90-day window and ≥ `request_date`
+- Plan structure must be legal (e.g. installments must match a supplied
+  `payment_option_id`, partial must be exactly 2 payments summing to the
+  request amount)
+- The forecast must never dip below minimum
+- The last payment must be ≤ `desired_completion_date`
+
+Invalid combinations are dropped.
+
+### 10. Ranking
+
+Valid candidates are ranked by the exact 6-tier rule:
+
+1. Complete the full request by `desired_completion_date` (already
+   enforced by validation)
+2. Require no spending changes
+3. Minimize total paid
+4. Start earlier
+5. Fewer payments
+6. Lowest `payment_option_id`
+
+`not_recommended` is **excluded** from ranking and used only when no
+other candidate passes validation.
+
+### 11. Explanation
+
+The deterministic decision is passed to GPT-OSS 120B with an explicit
+instruction to reuse status and method verbatim and to introduce no new
+numbers. If the response is empty, too long, or introduces an
+implausible figure, a deterministic template is used instead.
+
+---
+
+## Key Design Decisions
+
+1. **Deterministic engine owns every financial value.** The LLM never
+   computes amounts, dates, or plans. It only reads and phrases.
+2. **Bounded candidate search.** At most 400 (plan × change-set)
+   validations per request.
+3. **`Decimal` for money.** No floats where currency is involved.
+4. **Strict recurrence detection.** Ambiguous series are treated as
+   one-off, which is conservative.
+5. **Missing amounts are never zero.** Blank event amounts trigger an
+   optional VLM call; if extraction fails, the event is skipped safely.
+6. **`not_recommended` never competes on cost.** It's a fallback, not a
+   plan.
+7. **Explanation has a deterministic fallback.** The engine's decision
+   is authoritative.
+8. **All AI calls are cached.** Same message content → same extraction.
+   Same image → same extraction. This bounds cost and avoids
+   inconsistency across requests.
+9. **Token caps per call site.** Message extraction, explanation, and
+   VLM extraction each have their own `max_tokens` to stay under the
+   free-tier per-minute limits.
+
+---
+
+## Testing
+
+```powershell
+cd code
+pytest ../tests -v
+```
+
+The current suite includes smoke tests for state building, forecast
+creation, and safe-amount bounding. Additional tests can be added under
+`tests/` following the same import pattern.
+
+---
+
+## Usage & Cost Report
+
+After every run, `code/evaluation/usage_report.md` is regenerated with:
+
+- Per-model call counts
+- Input / output / total tokens per model
+- Estimated cost per model (configurable pricing in `code/config.py`)
+- Per-request averages across the full dataset
+- Overall totals
+
+**Example for the final 250-request run:**
+
+| Metric | Value |
+|---|---|
+| Model | `openai/gpt-oss-120b` |
+| Calls | 250 |
+| Input tokens | ~81,000 |
+| Output tokens | ~17,000 |
+| Total tokens | ~98,000 |
+| Estimated cost | **~$0.022 USD** |
+
+Pricing is intentionally kept in `MODEL_PRICING` inside `code/config.py`
+so it can be updated without touching any call site.
+
+---
+
+## Submission Artifacts
+
+| Artifact | Description |
+|---|---|
+| `dataset/output.csv` | Predictions for every row in `dataset/requests.csv` |
+| `code.zip` | Full runnable source, prompts, README, evaluation folder |
+| `chat_transcript` | Development conversation (provided separately) |
+
+`code.zip` includes:
+
+```
+code/                (all source)
+tests/               (pytest smoke tests)
+evaluation/          (nested under code/)
+README.md
+requirements.txt
+.env.example
+.gitignore
+```
+
+`code.zip` excludes:
+
+```
+.venv/
+.git/
+.env
+__pycache__/
+.pytest_cache/
+logs/run.log
+dataset/media/
+```
+
+---
+
+## Limitations
+
+- **Recurring detection is heuristic.** Some variable-amount series are
+  conservatively treated as one-off, which can under-estimate a user's
+  future expenses.
+- **VLM OCR occasionally fails** on dense receipts. When it does, the
+  affected event is skipped — never treated as a zero-amount event.
+- **Free-tier Groq rate limits** cause occasional retries and slow down
+  the LLM-enabled run. The client backs off and retries up to 3 times.
+- **Explanation LLM is optional.** `--no-llm-exp` produces a fully
+  deterministic `output.csv` in ~30 seconds.
+- **Investment requests** are treated purely as affordability questions.
+  No market data or investment advice is produced.
+
+---
+
+## License
+
+Submission for HackerRank Orchestrate — September 2026.

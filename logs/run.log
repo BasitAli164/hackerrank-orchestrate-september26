@@ -9,3 +9,18 @@
 2026-09-13 10:15:50,544 INFO [data_loader]   -> 25342 rows, 14 cols
 2026-09-13 10:15:50,667 INFO [data_loader] Loading request_payment_options.csv
 2026-09-13 10:15:50,671 INFO [data_loader]   -> 790 rows, 9 cols
+2026-09-13 10:16:00,697 INFO [data_loader] Loading exchange_rates.csv
+2026-09-13 10:16:00,701 INFO [data_loader]   -> 134 rows, 4 cols
+2026-09-13 10:16:09,354 INFO [main] Processed 25/250 (failures=0)
+2026-09-13 10:17:16,011 INFO [main] Processed 50/250 (failures=0)
+2026-09-13 10:18:31,589 INFO [main] Processed 75/250 (failures=0)
+2026-09-13 10:19:43,980 INFO [main] Processed 100/250 (failures=0)
+2026-09-13 10:20:57,921 INFO [main] Processed 125/250 (failures=0)
+2026-09-13 10:22:12,649 INFO [main] Processed 150/250 (failures=0)
+2026-09-13 10:23:22,305 INFO [main] Processed 175/250 (failures=0)
+2026-09-13 10:24:33,779 INFO [main] Processed 200/250 (failures=0)
+2026-09-13 10:25:45,303 INFO [main] Processed 225/250 (failures=0)
+2026-09-13 10:26:56,705 INFO [main] Processed 250/250 (failures=0)
+2026-09-13 10:26:56,741 INFO [main] Wrote D:\HackerRank Project\hackerrank-orchestrate-september26\dataset\output.csv (250 rows)
+2026-09-13 10:26:56,748 INFO [main] Wrote usage report: D:\HackerRank Project\hackerrank-orchestrate-september26\code\evaluation\usage_report.md
+2026-09-13 10:26:56,749 INFO [main] === Done. Failures: 0 ===
