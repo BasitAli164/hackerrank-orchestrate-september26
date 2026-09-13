@@ -1,0 +1,11 @@
+2026-09-13 10:15:49,900 INFO [main] === Buy-or-Wait starting ===
+2026-09-13 10:15:49,901 INFO [main] Sample mode: False | LLM explanation: True
+2026-09-13 10:15:49,901 INFO [data_loader] Loading requests.csv
+2026-09-13 10:15:49,910 INFO [data_loader]   -> 250 rows, 8 cols
+2026-09-13 10:15:49,929 INFO [main] Loaded 250 requests
+2026-09-13 10:15:50,410 INFO [data_loader] Loading financial_profiles.csv
+2026-09-13 10:15:50,414 INFO [data_loader]   -> 275 rows, 10 cols
+2026-09-13 10:15:50,423 INFO [data_loader] Loading financial_events.csv
+2026-09-13 10:15:50,544 INFO [data_loader]   -> 25342 rows, 14 cols
+2026-09-13 10:15:50,667 INFO [data_loader] Loading request_payment_options.csv
+2026-09-13 10:15:50,671 INFO [data_loader]   -> 790 rows, 9 cols

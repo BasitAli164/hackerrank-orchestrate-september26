@@ -9,6 +9,15 @@ Handles:
 
 Token caps are enforced at each call site to stay under per-minute limits
 on the free tier (especially Qwen's 1000 OTPM cap).
+
+VLM strategy:
+  Qwen 3.6 27B has a small OTPM cap on the free tier and its
+  `response_format=json_object` mode sometimes returns empty output when
+  the model's reasoning consumes the max_tokens budget. We therefore:
+    - use a generous max_tokens (800)
+    - keep json_object mode, but retry once WITHOUT it if we get an
+      empty/invalid response, relying on _safe_json_loads to extract
+      the JSON from plain text.
 """
 from __future__ import annotations
 
@@ -38,7 +47,7 @@ load_dotenv()
 # Per-call max_tokens caps (safety against OTPM limits on free tier)
 _LLM_JSON_MAX_TOKENS = 2000
 _LLM_TEXT_MAX_TOKENS = 600
-_VLM_JSON_MAX_TOKENS = 400
+_VLM_JSON_MAX_TOKENS = 800
 
 
 class GroqError(RuntimeError):
@@ -167,8 +176,12 @@ class GroqClient:
         max_retries: int = 3,
     ) -> dict:
         """
-        Send one local PNG to Qwen 3.6 27B, request JSON object output.
-        Enforces image size limit before sending.
+        Send one local PNG to Qwen 3.6 27B, request JSON.
+
+        Strategy:
+          1. First try with response_format=json_object
+          2. If the response is empty/unparseable, retry WITHOUT
+             response_format (plain text), relying on _safe_json_loads.
         """
         path = os.fspath(image_path)
         if not os.path.isfile(path):
@@ -196,22 +209,32 @@ class GroqClient:
 
         last_err: Optional[Exception] = None
         for attempt in range(1, max_retries + 1):
+            # Alternate: json_object on odd attempts, plain on even
+            use_json_mode = (attempt % 2 == 1)
             try:
-                resp = self._client.chat.completions.create(
+                kwargs: dict[str, Any] = dict(
                     model=self.vlm_model,
                     messages=messages,
-                    response_format={"type": "json_object"},
                     temperature=0,
                     max_tokens=_VLM_JSON_MAX_TOKENS,
                 )
+                if use_json_mode:
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                resp = self._client.chat.completions.create(**kwargs)
                 self._track(resp, purpose, request_id)
-                content = resp.choices[0].message.content or "{}"
-                return _safe_json_loads(content)
+                content = (resp.choices[0].message.content or "").strip()
+                if not content:
+                    raise GroqError("empty VLM response")
+                parsed = _safe_json_loads(content)
+                if not parsed:
+                    raise GroqError(f"unparseable VLM response: {content[:120]!r}")
+                return parsed
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 log.warning(
-                    "VLM call failed (attempt %d/%d, purpose=%s): %s",
-                    attempt, max_retries, purpose, e,
+                    "VLM call failed (attempt %d/%d, json_mode=%s, purpose=%s): %s",
+                    attempt, max_retries, use_json_mode, purpose, e,
                 )
                 if attempt < max_retries:
                     time.sleep(1.5 * attempt)
@@ -236,29 +259,60 @@ class GroqClient:
 
 def _safe_json_loads(text: str) -> dict:
     """
-    Robust JSON parse for LLM output. Strips code fences if present.
+    Robust JSON parse for LLM output.
+
+    Handles:
+      - ```json ... ``` code fences
+      - <think>...</think> reasoning blocks (Qwen 3.x)
+      - leading prose before the JSON object
+      - trailing prose after the JSON object
+
     Returns empty dict if unrecoverable — callers MUST validate.
     """
+    if not text:
+        return {}
+
+    import re
     t = text.strip()
+
+    # 1. Strip any <think>...</think> block (Qwen reasoning)
+    t = re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL | re.IGNORECASE).strip()
+    # Also strip a lone dangling <think> with no close
+    t = re.sub(r"<think>", "", t, flags=re.IGNORECASE).strip()
+
+    # 2. Strip ```json ... ``` or ``` ... ``` fences
     if t.startswith("```"):
-        # strip ```json ... ```
         t = t.strip("`")
         if t.lower().startswith("json"):
             t = t[4:]
         t = t.strip()
+
+    # 3. Direct parse
     try:
         obj = json.loads(t)
         if isinstance(obj, dict):
             return obj
         return {"_value": obj}
     except json.JSONDecodeError:
-        # last resort: extract first {...} block
-        start = t.find("{")
-        end = t.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(t[start : end + 1])
-            except json.JSONDecodeError:
-                pass
+        pass
+
+    # 4. Last resort: extract the first balanced {...} block
+    start = t.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(t)):
+            if t[i] == "{":
+                depth += 1
+            elif t[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = t[start : i + 1]
+                    try:
+                        obj = json.loads(candidate)
+                        if isinstance(obj, dict):
+                            return obj
+                    except json.JSONDecodeError:
+                        break
+
     log.warning("Could not parse LLM JSON output: %r", text[:200])
     return {}

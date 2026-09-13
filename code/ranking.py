@@ -9,6 +9,10 @@ Rank valid candidates by the exact 6-tier rule from the problem statement:
   6. Use the lowest payment_option_id (final tie-breaker)
 
 Deterministic Python only — never delegate this to an LLM.
+
+NOTE: `not_recommended` candidates are intentionally excluded from ranking.
+They have no payments and would otherwise sort first on "minimize total paid",
+which is wrong. The pipeline treats them as the ultimate fallback.
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ def _ranking_key(candidate: Candidate) -> tuple:
     first_payment = candidate.first_payment_date() or date.max
     n_payments = candidate.n_payments()
 
-    # For tie-break #6: payment_option_id — put option-bearing methods
+    # Tie-break #6: payment_option_id — put option-bearing methods
     # before synthetic ones. Synthetic methods get a large sentinel.
     option_id = candidate.payment_option_id or "zzzzz"
 
@@ -54,8 +58,12 @@ def rank_candidates(candidates: list[Candidate]) -> list[Candidate]:
     """
     Return candidates sorted best-first.
     Caller should pre-filter to only VALID candidates.
+
+    not_recommended candidates are STRIPPED OUT here — the pipeline is
+    responsible for treating them as a fallback when no real plan exists.
     """
-    return sorted(candidates, key=_ranking_key)
+    real = [c for c in candidates if c.method != "not_recommended"]
+    return sorted(real, key=_ranking_key)
 
 
 def pick_best(candidates: list[Candidate]) -> Optional[Candidate]:
@@ -76,17 +84,16 @@ def describe(c: Candidate) -> str:
 
 
 if __name__ == "__main__":
-    # Smoke test with synthetic candidates
     from datetime import date as _d
     from decimal import Decimal as D
-    from payment_planner import Candidate
 
     c1 = Candidate(method="full_payment",
-                   payments=[(_d(2024,3,3), D("100"))])
+                   payments=[(_d(2024, 3, 3), D("100"))])
     c2 = Candidate(method="installments",
-                   payments=[(_d(2024,3,10), D("50")), (_d(2024,4,10), D("50"))],
+                   payments=[(_d(2024, 3, 10), D("50")), (_d(2024, 4, 10), D("50"))],
                    payment_option_id="payment_option_03")
     c3 = Candidate(method="wait",
-                   payments=[(_d(2024,4,15), D("100"))])
-    for c in rank_candidates([c2, c3, c1]):
+                   payments=[(_d(2024, 4, 15), D("100"))])
+    c4 = Candidate(method="not_recommended", payments=[])
+    for c in rank_candidates([c2, c3, c1, c4]):
         print(describe(c))
